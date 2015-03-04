@@ -20,13 +20,11 @@ def negative_log_likelihood(output, prediction):
 
 class ClockworkGroup(object):
     def __init__(self, size, label_number, input_shape, greater_label_shapes,
-                 shorter_label_shapes=None,
                  initial_activation=None,
                  activation_function=T.tanh):
         self.size = size
         self.input_shape = input_shape
         self.label = label_number
-        self.sl_groups_sizes = shorter_label_shapes
         self.gl_groups_sizes = greater_label_shapes
         if initial_activation:
             self.current_activation = theano.shared(initial_activation)
@@ -55,9 +53,10 @@ class ClockworkGroup(object):
                                                                size=(self.size, gl_size)).astype(floatX),
                                               name="{}_{}_W_h_inc".format(i, self.label)))
 
-        self.biases = theano.shared(np.zeros(self.size, dtype=floatX))#np.random.normal(loc=0.0, scale=variance(self.size),
-                                                     # size=self.size).astype(floatX),
-                                    # name="{}_biases".format(self.label))
+        self.biases = theano.shared(
+            np.zeros(self.size, dtype=floatX))  # np.random.normal(loc=0.0, scale=variance(self.size),
+        # size=self.size).astype(floatX),
+        # name="{}_biases".format(self.label))
 
         self.params.append(self.W_in)
         self.params.append(self.W_self)
@@ -69,12 +68,11 @@ class ClockworkGroup(object):
                        current_activation=None):
         if not current_activation:
             current_activation = self.current_activation
-        W_in, W_self, W_h_inc, biases = self.params[0], self.params[1], self.params[2:-1], self.params[-1]
 
-        new_activation = T.dot(W_in, previous_layer_activation)
-        new_activation += sum([T.dot(p_w, p_a) for p_w, p_a in zip(W_h_inc, greater_group_activation)])
-        new_activation += T.dot(W_self, current_activation)
-        new_activation += biases
+        new_activation = T.dot(self.W_in, previous_layer_activation)
+        new_activation += sum([T.dot(p_w, p_a) for p_w, p_a in zip(self.W_h_inc, greater_group_activation)])
+        new_activation += T.dot(self.W_self, current_activation)
+        new_activation += self.biases
         new_activation = self.act_func(new_activation)
         # return new_activation
         return T.switch(T.eq(time_step % self.label, 0), new_activation, current_activation)
@@ -142,8 +140,9 @@ class OutputLayer(object):
         self.W_in = theano.shared(np.random.normal(loc=0.0, scale=variance(input_shape),
                                                    size=(shape, input_shape)).astype(floatX),
                                   name="output_W_in")
-        self.bias = theano.shared(np.zeros(shape, dtype=floatX))#np.random.normal(loc=0.0, scale=variance(input_shape),
-        #                                            size=shape).astype(floatX),
+        self.bias = theano.shared(
+            np.zeros(shape, dtype=floatX))  # np.random.normal(loc=0.0, scale=variance(input_shape),
+        # size=shape).astype(floatX),
         #                           name="output_biases")
 
         self.params = [self.W_in, self.bias]
@@ -164,7 +163,6 @@ class ClockWorkRNN(object):
         self.hidden_layers = []
         self.time_step = theano.shared(np.int32(1))
         previous_size = layer_sizes[0]
-        previous_output = self.input_layer.get_input()
         self.params = []
         for neuron_array, label_array in layer_sizes[1:-1]:
             hidden_layer = ClockworkLayer(neuron_array, label_array, previous_size,
@@ -197,7 +195,8 @@ class ClockWorkRNN(object):
             new_hidden_activations.extend(output)
             incoming_input = T.concatenate(output)
         output = T.flatten(self.output_layer.get_activation(incoming_input))
-        return [output], zip(hidden_activations, new_hidden_activations) + [(time_step, time_step + 1)]
+        return [output,
+                time_step + 1] + new_hidden_activations  # , zip(hidden_activations, new_hidden_activations) + [(time_step, time_step + 1)]
 
 
     def _split_layer_activations(self, activations):
@@ -215,13 +214,15 @@ class ClockWorkRNN(object):
             activations.append(layer.get_current_group_activations())
         return sum(activations, [])
 
-
-    def grad(self):
-        return T.grad(self.cost(self.output, self.y), self.params)
-
-    def fptt(self):
+    def fptt(self, keep_activations=False):
         result, updates = theano.scan(fn=self._recurrence, sequences=[self.XT],
-                                      non_sequences=[self.time_step] + self._get_current_hidden_activations())
+                                      outputs_info=[None, self.time_step] + self._get_current_hidden_activations())
+        if keep_activations:
+            updates[self.time_step] = result[1][-1]
+            for activation, new_activation in zip(self._get_current_hidden_activations(), [r[-1] for r in result[2:]]):
+                updates[activation] = new_activation
+
+        result = result[0]
         return result, updates
 
     def reset(self):
@@ -245,35 +246,43 @@ class ClockWorkRNN(object):
         return self._get_current_activations()
 
 
-def adam(loss, all_params, learning_rate=0.02, beta1=0.1, beta2=0.001,
-         epsilon=1e-8, l_decay=1 - 1e-4):
+def adam(loss, all_params, learning_rate=0.001, b1=0.9, b2=0.999, e=1e-8,
+         gamma=1 - 1e-8):
+    """
+    Code taken from https://gist.github.com/skaae/ae7225263ca8806868cb
 
+    ADAM update rules
+    Default values are taken from [Kingma2014]
 
+    References:
+    [Kingma2014] Kingma, Diederik, and Jimmy Ba.
+    "Adam: A Method for Stochastic Optimization."
+    arXiv preprint arXiv:1412.6980 (2014).
+    http://arxiv.org/pdf/1412.6980v4.pdf
+
+    """
     updates = []
     all_grads = theano.grad(loss, all_params)
+    alpha = learning_rate
+    t = theano.shared(np.float32(1))
+    b1_t = b1 * gamma ** (t - 1)  # (Decay the first moment running average coefficient)
 
-    i = theano.shared(np.dtype(theano.config.floatX).type(0))
-    i_t = i + 1.
+    for theta_previous, g in zip(all_params, all_grads):
+        m_previous = theano.shared(np.zeros(theta_previous.get_value().shape,
+                                            dtype=theano.config.floatX))
+        v_previous = theano.shared(np.zeros(theta_previous.get_value().shape,
+                                            dtype=theano.config.floatX))
 
-    learning_rate_t = learning_rate * T.sqrt(1. - (1. - beta2) ** i_t) / (1. - (1. - beta1) ** i_t)
+        m = b1_t * m_previous + (1 - b1_t) * g  # (Update biased first moment estimate)
+        v = b2 * v_previous + (1 - b2) * g ** 2  # (Update biased second raw moment estimate)
+        m_hat = m / (1 - b1 ** t)  # (Compute bias-corrected first moment estimate)
+        v_hat = v / (1 - b2 ** t)  # (Compute bias-corrected second raw moment estimate)
+        theta = theta_previous - (alpha * m_hat) / (T.sqrt(v_hat) + e)  # (Update parameters)
 
-    beta1_t = 1 - (1 - beta1) * l_decay ** (i_t - 1)  # ADDED
-
-    for param_i, g in zip(all_params, all_grads):
-        m = theano.shared(
-            np.zeros(param_i.get_value().shape, dtype=theano.config.floatX))
-        v = theano.shared(
-            np.zeros(param_i.get_value().shape, dtype=theano.config.floatX))
-
-        m_t = (beta1_t * g) + ((1. - beta1_t) * m)
-        v_t = (beta2 * (g ** 2)) + ((1. - beta2) * v)
-        g_t = m_t / (T.sqrt(v_t) + epsilon)
-        param_i_t = param_i - (learning_rate_t * g_t)
-
-        updates.append((m, m_t))
-        updates.append((v, v_t))
-        updates.append((param_i, param_i_t))
-    updates.append((i, i_t))
+        updates.append((m_previous, m))
+        updates.append((v_previous, v))
+        updates.append((theta_previous, theta))
+    updates.append((t, t + 1.))
     return updates
 
 
@@ -283,46 +292,47 @@ def quadratic_loss(a, b):
     return T.mean((b - a) ** 2)
 
 
-if __name__ == "__main__":
-    g1_size = 5
-    net = ClockWorkRNN(layer_sizes=(1, ([100] * g1_size, [2**i for i in range(g1_size)]), 1),
+def func_to_learn(X):
+    return np.cos(np.sin(X) + 1)
+
+
+def main():
+    g1_size = 6
+    net = ClockWorkRNN(layer_sizes=(1, ([100] * g1_size, [2 ** i for i in range(g1_size)]), 1),
                        cost=quadratic_loss,
                        hidden_activation=T.tanh,
                        output_activation=T.tanh)
-    # grads = net.grads()
 
-    res, upd = net.fptt()
+    res, upd = net.fptt(keep_activations=True)
     fptt = theano.function(inputs=[net.XT], outputs=res, updates=upd)
-    # print f(net.XT.tag.test_value)
-    # print net.Y.tag.test_value
 
-    # grads = T.grad(net.cost(res[0], net.Y), net.params)
+    predict_after = 2
+    loss = net.cost(res[predict_after:], net.Y[predict_after:])
 
-    predict_after = 10
-    loss = net.cost(res[predict_after:-2], net.Y[predict_after+2:])
-
-    train_updates = adam(loss, net.params, learning_rate=0.0002)
-    train_func = theano.function(inputs=[net.XT, net.Y], outputs=[loss], updates=train_updates + upd)
+    train_updates = adam(loss, net.params, learning_rate=0.001)
+    train_func = theano.function(inputs=[net.XT, net.Y], outputs=[loss], updates=upd + train_updates)
 
     losses = []
-
-    for i in range(500):
-        X = np.linspace(0, np.abs(np.int32(np.random.randn()*13))+5, num=np.abs(np.int32(np.random.randn()*150))+80, dtype=floatX)
-        y = np.sin(X).astype(floatX)
+    upto = 15  # np.abs(np.int32(np.random.randn()*13))+6
+    X = np.linspace(0, upto, num=upto * 30, dtype=floatX)
+    y = func_to_learn(X).astype(floatX)
+    for i in range(300):
         losses.append(train_func(X.reshape(-1, 1), y.reshape(-1, 1))[0])
         # print net.get_current_activations()
-        print losses[-1]
+        print i, ':', losses[-1]
         net.reset()
 
-    from pprint import pprint
-
-    X = np.linspace(0, 30, num=3000, dtype=floatX)
+    X = np.linspace(0, 30, num=30 * 30, dtype=floatX)
     y = np.sin(X).astype(floatX)
     print ("Inaccuracy", np.abs(fptt(X.reshape(-1, 1)).reshape(-1) - y.reshape(-1)).mean())
     plt.plot(losses)
     plt.savefig('rnn_quadratic_cost.jpg')
     plt.clf()
     plt.plot(X, fptt(X.reshape(-1, 1)), label='model')
-    plt.plot(X, np.sin(X), label='actual')
+    plt.plot(X, func_to_learn(X), label='actual')
     plt.legend()
     plt.savefig('rnn_prediction_vs_actual.jpg')
+
+
+if __name__ == "__main__":
+    main()
