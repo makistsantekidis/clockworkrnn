@@ -3,8 +3,10 @@ __author__ = 'mike'
 import numpy as np
 import theano
 from theano import tensor as T
+from theano.ifelse import ifelse
 from theano.tensor.nnet import softmax
 import matplotlib.pyplot as plt
+import cPickle as pickle
 
 floatX = theano.config.floatX
 
@@ -16,6 +18,13 @@ def variance(input_size):
 def negative_log_likelihood(output, prediction):
     output, prediction = T.flatten(output), T.flatten(prediction)
     return -T.mean(T.log(output)[prediction])
+
+def float32(k):
+    return np.cast['float32'](k)
+
+
+def int32(k):
+    return np.cast['int32'](k)
 
 
 class ClockworkGroup(object):
@@ -75,7 +84,8 @@ class ClockworkGroup(object):
         new_activation += self.biases
         new_activation = self.act_func(new_activation)
         # return new_activation
-        return T.switch(T.eq(time_step % self.label, 0), new_activation, current_activation)
+        # return T.switch(T.eq(time_step % self.label, 0), new_activation, current_activation)
+        return ifelse(T.eq(time_step % self.label, 0), new_activation, current_activation)
 
 
 class ClockworkLayer(object):
@@ -143,7 +153,7 @@ class OutputLayer(object):
         self.bias = theano.shared(
             np.zeros(shape, dtype=floatX))  # np.random.normal(loc=0.0, scale=variance(input_shape),
         # size=shape).astype(floatX),
-        #                           name="output_biases")
+        # name="output_biases")
 
         self.params = [self.W_in, self.bias]
         self.activation_function = activation_function
@@ -241,8 +251,7 @@ class ClockWorkRNN(object):
 
     def get_current_activations(self):
         if not getattr(self, '_get_current_activations', None):
-            self._get_current_activations = theano.function([],
-                                                              outputs=self._get_current_hidden_activations())
+            self._get_current_activations = theano.function([], outputs=self._get_current_hidden_activations())
         return self._get_current_activations()
 
 
@@ -293,8 +302,13 @@ def quadratic_loss(a, b):
 
 
 def func_to_learn(X):
-    return np.cos(np.sin(X) + 1)
+    return np.cos(np.sin(np.cos(X)+ 1)+1)
 
+def create_func_params(upto=15, freq=0.1):
+    X = np.ones(upto/freq, dtype=floatX)*freq
+    x_series = np.linspace(0, upto, num=upto/freq, dtype=floatX)
+    y = func_to_learn(x_series).astype(floatX)
+    return X, y, x_series
 
 def main():
     g1_size = 6
@@ -303,36 +317,56 @@ def main():
                        hidden_activation=T.tanh,
                        output_activation=T.tanh)
 
-    res, upd = net.fptt(keep_activations=True)
+    res, upd = net.fptt(keep_activations=False)
     fptt = theano.function(inputs=[net.XT], outputs=res, updates=upd)
-
+    learning_rate = theano.shared(float32(0.001))
+    decrement = float32(0.96)
     predict_after = 2
     loss = net.cost(res[predict_after:], net.Y[predict_after:])
 
-    train_updates = adam(loss, net.params, learning_rate=0.001)
+    train_updates = adam(loss, net.params, learning_rate=learning_rate)
     train_func = theano.function(inputs=[net.XT, net.Y], outputs=[loss], updates=upd + train_updates)
 
     losses = []
-    upto = 15  # np.abs(np.int32(np.random.randn()*13))+6
-    X = np.linspace(0, upto, num=upto * 30, dtype=floatX)
-    y = func_to_learn(X).astype(floatX)
+    # X = np.linspace(0, upto, num=upto * 30, dtype=floatX)
+    X,y,x_series = create_func_params(20, 0.1)
+    best = np.inf
+    plt.ion()
+    last_best_index = 0
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+    actual, = ax.plot(x_series, y)
+    model, = ax.plot(x_series, fptt(X.reshape(-1, 1)))
     for i in range(300):
         losses.append(train_func(X.reshape(-1, 1), y.reshape(-1, 1))[0])
         # print net.get_current_activations()
         print i, ':', losses[-1]
         net.reset()
 
-    X = np.linspace(0, 30, num=30 * 30, dtype=floatX)
-    y = np.sin(X).astype(floatX)
-    print ("Inaccuracy", np.abs(fptt(X.reshape(-1, 1)).reshape(-1) - y.reshape(-1)).mean())
+        model.set_ydata(fptt(X.reshape(-1, 1)))
+        fig.canvas.draw()
+        if best > losses[-1]:
+            last_best_index = i
+            best = losses[-1]
+        elif i - last_best_index > 3:
+            best = losses[-1]
+            new_rate = learning_rate.get_value() * decrement
+            learning_rate.set_value(new_rate)
+            last_best_index = i - 2
+            print("New learning rate", new_rate)
+
+    X,y, x_series = create_func_params(60, 0.1)
+    plt.ioff()
+    plt.clf()
     plt.plot(losses)
     plt.savefig('rnn_quadratic_cost.jpg')
     plt.clf()
-    plt.plot(X, fptt(X.reshape(-1, 1)), label='model')
-    plt.plot(X, func_to_learn(X), label='actual')
+    plt.plot(x_series, fptt(X.reshape(-1, 1)), label='model')
+    plt.plot(x_series, y, label='actual')
     plt.legend()
     plt.savefig('rnn_prediction_vs_actual.jpg')
-
+    with open('net.pickle', 'wb') as f:
+        pickle.dump(net, f)
 
 if __name__ == "__main__":
     main()
