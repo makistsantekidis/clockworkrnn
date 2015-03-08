@@ -6,8 +6,7 @@ which I am using to with the idea.
 
 #### WARNING! Hastily written and unreadable code. Also, it will probably not work so use at your own discretion.
 
-Currently what I am trying, is to make it learn a custom function, but I am doing it in all the wrong ways 
-and the current experiment will not work.
+In this revision, I try to make the network learn a function and giving as input the steps it should take towards that function.
 
 Big problem I am currently facing is that theano.grad is really slow when constructing networks with many groups in each layer.
 

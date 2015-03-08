@@ -1,23 +1,19 @@
 __author__ = 'mike'
 
+import cPickle as pickle
+
 import numpy as np
 import theano
 from theano import tensor as T
 from theano.ifelse import ifelse
 from theano.tensor.nnet import softmax
 import matplotlib.pyplot as plt
-import cPickle as pickle
+from hf import hf_optimizer, SequenceDataset
+
+from utils import adam, negative_log_likelihood, quadratic_loss, variance
 
 floatX = theano.config.floatX
 
-
-def variance(input_size):
-    return 2.0 / input_size
-
-
-def negative_log_likelihood(output, prediction):
-    output, prediction = T.flatten(output), T.flatten(prediction)
-    return -T.mean(T.log(output)[prediction])
 
 def float32(k):
     return np.cast['float32'](k)
@@ -78,11 +74,11 @@ class ClockworkGroup(object):
         if not current_activation:
             current_activation = self.current_activation
 
-        new_activation = T.dot(self.W_in, previous_layer_activation)
-        new_activation += sum([T.dot(p_w, p_a) for p_w, p_a in zip(self.W_h_inc, greater_group_activation)])
-        new_activation += T.dot(self.W_self, current_activation)
-        new_activation += self.biases
-        new_activation = self.act_func(new_activation)
+        new_activation = T.dot(self.W_in, T.transpose(previous_layer_activation))
+        new_activation += sum([T.dot(p_w, T.transpose(p_a)) for p_w, p_a in zip(self.W_h_inc, greater_group_activation)])
+        new_activation += T.dot(self.W_self, T.transpose(current_activation))
+        new_activation += self.biases.reshape((-1, 1))
+        new_activation = T.transpose(self.act_func(new_activation))
         # return new_activation
         # return T.switch(T.eq(time_step % self.label, 0), new_activation, current_activation)
         return ifelse(T.eq(time_step % self.label, 0), new_activation, current_activation)
@@ -159,14 +155,16 @@ class OutputLayer(object):
         self.activation_function = activation_function
 
     def get_activation(self, previous_layer_activation):
-        return self.activation_function(T.dot(self.params[0], previous_layer_activation) + self.params[1])
+        return self.activation_function(T.dot(self.params[0], T.transpose(previous_layer_activation)) + self.params[1].reshape((-1,1)))
 
 
 class ClockWorkRNN(object):
     def __init__(self, layer_sizes=(1, ((10, 10, 10), (1, 2, 4)), 2),
                  cost=negative_log_likelihood,
                  hidden_activation=T.tanh,
-                 output_activation=softmax):
+                 output_activation=softmax,
+                 update_fn=adam):
+        self.update_fn = update_fn
         self.layer_sizes = layer_sizes
         self.cost = cost
         self.input_layer = InputLayer(layer_sizes[0])
@@ -188,8 +186,13 @@ class ClockWorkRNN(object):
         self.y = T.vector('y')
         self.Y = T.matrix('Y')
         self.X = self.input_layer.get_input()
+        self.batchX = T.tensor3('batchX')
+        self.batchY = T.tensor3('batchY')
         self.XT = T.matrix('XT')
         # test_values
+        batchXtest,batchYtest,gaaah = create_batch_func_params()
+        self.batchX.tag.test_value = batchXtest
+        self.batchY.tag.test_value = batchYtest
         self.X.tag.test_value = np.random.randn(self.input_layer.shape)
         self.y.tag.test_value = np.asarray([1, 0], dtype=np.int32)
         self.Y.tag.test_value = np.asarray([[1, 0]] * 10, dtype=np.int32)
@@ -203,7 +206,7 @@ class ClockWorkRNN(object):
             output = layer.get_activations(input_activation=incoming_input, time_step=time_step,
                                            current_activation=activation)
             new_hidden_activations.extend(output)
-            incoming_input = T.concatenate(output)
+            incoming_input = T.concatenate(output, axis=1)
         output = T.flatten(self.output_layer.get_activation(incoming_input))
         return [output,
                 time_step + 1] + new_hidden_activations  # , zip(hidden_activations, new_hidden_activations) + [(time_step, time_step + 1)]
@@ -224,16 +227,45 @@ class ClockWorkRNN(object):
             activations.append(layer.get_current_group_activations())
         return sum(activations, [])
 
-    def fptt(self, keep_activations=False):
-        result, updates = theano.scan(fn=self._recurrence, sequences=[self.XT],
-                                      outputs_info=[None, self.time_step] + self._get_current_hidden_activations())
-        if keep_activations:
-            updates[self.time_step] = result[1][-1]
-            for activation, new_activation in zip(self._get_current_hidden_activations(), [r[-1] for r in result[2:]]):
-                updates[activation] = new_activation
+    def _get_batch_hidden_activations(self, batch_size):
+        activations = []
+        for layer in self.hidden_layers:
+            group_activations = []
+            for group in layer.get_current_group_activations():
+                group_activations.append(T.ones(batch_size, dtype=floatX).dimshuffle(0, 'x') * group)
+            activations.append(group_activations)
+        return sum(activations, [])
 
-        result = result[0]
-        return result, updates
+    def create_batch_bptt(self, batch_size):
+        X_dimshuffled = self.batchX.dimshuffle(1, 0, 2)
+        Y_dimshuffled = self.batchY.dimshuffle(1, 0, 2)
+        # [result, time_steps, activations], updates = \
+        results, updates =   theano.scan(fn=self._recurrence, sequences=[X_dimshuffled],
+                        outputs_info=[None, self.time_step] + self._get_batch_hidden_activations(batch_size))
+        result = results[0]
+        self.batch_fptt = theano.function([self.batchX], [result])
+        loss = self.cost(result, Y_dimshuffled)
+        updates = self.update_fn(loss, self.params)
+        self._bptt = theano.function([self.batchX, self.batchY], [loss], updates=updates)
+
+    def bptt(self, X, Y):
+        if not getattr(self, '_bptt', None):
+            self.create_batch_bptt(len(X))
+
+        # print self.batch_fptt(X)
+        return self._bptt(X, Y)
+
+
+    # def fptt(self, keep_activations=False):
+    #     result, updates = theano.scan(fn=self._recurrence, sequences=[self.XT],
+    #                                   outputs_info=[None, self.time_step] + self._get_current_hidden_activations())
+    #     if keep_activations:
+    #         updates[self.time_step] = result[1][-1]
+    #         for activation, new_activation in zip(self._get_current_hidden_activations(), [r[-1] for r in result[2:]]):
+    #             updates[activation] = new_activation
+    #
+    #     result = result[0]
+    #     return result, updates
 
     def reset(self):
         if not getattr(self, '_reset', None):
@@ -255,118 +287,93 @@ class ClockWorkRNN(object):
         return self._get_current_activations()
 
 
-def adam(loss, all_params, learning_rate=0.001, b1=0.9, b2=0.999, e=1e-8,
-         gamma=1 - 1e-8):
-    """
-    Code taken from https://gist.github.com/skaae/ae7225263ca8806868cb
-
-    ADAM update rules
-    Default values are taken from [Kingma2014]
-
-    References:
-    [Kingma2014] Kingma, Diederik, and Jimmy Ba.
-    "Adam: A Method for Stochastic Optimization."
-    arXiv preprint arXiv:1412.6980 (2014).
-    http://arxiv.org/pdf/1412.6980v4.pdf
-
-    """
-    updates = []
-    all_grads = theano.grad(loss, all_params)
-    alpha = learning_rate
-    t = theano.shared(np.float32(1))
-    b1_t = b1 * gamma ** (t - 1)  # (Decay the first moment running average coefficient)
-
-    for theta_previous, g in zip(all_params, all_grads):
-        m_previous = theano.shared(np.zeros(theta_previous.get_value().shape,
-                                            dtype=theano.config.floatX))
-        v_previous = theano.shared(np.zeros(theta_previous.get_value().shape,
-                                            dtype=theano.config.floatX))
-
-        m = b1_t * m_previous + (1 - b1_t) * g  # (Update biased first moment estimate)
-        v = b2 * v_previous + (1 - b2) * g ** 2  # (Update biased second raw moment estimate)
-        m_hat = m / (1 - b1 ** t)  # (Compute bias-corrected first moment estimate)
-        v_hat = v / (1 - b2 ** t)  # (Compute bias-corrected second raw moment estimate)
-        theta = theta_previous - (alpha * m_hat) / (T.sqrt(v_hat) + e)  # (Update parameters)
-
-        updates.append((m_previous, m))
-        updates.append((v_previous, v))
-        updates.append((theta_previous, theta))
-    updates.append((t, t + 1.))
-    return updates
-
-
-def quadratic_loss(a, b):
-    a, b = a.flatten(), b.flatten()
-    # return T.mean(binary_crossentropy(a, b))
-    return T.mean((b - a) ** 2)
-
-
 def func_to_learn(X):
-    return np.cos(np.sin(np.cos(X)+ 1)+1)
+    return np.cos(np.sin(np.cos(X) + 1) + 1)
+
 
 def create_func_params(upto=15, freq=0.1):
-    X = np.ones(upto/freq, dtype=floatX)*freq
-    x_series = np.linspace(0, upto, num=upto/freq, dtype=floatX)
+    X = np.ones(upto / freq, dtype=floatX) * freq
+    x_series = np.linspace(0, upto, num=upto / freq, dtype=floatX)
     y = func_to_learn(x_series).astype(floatX)
     return X, y, x_series
 
+def create_batch_func_params(input_length=300, freq_var=0.1, size=20):
+    freqs = float32(np.abs(np.random.normal(scale=freq_var, size=size)))
+    # freqs = np.ones(size,dtype=floatX) * float32(0.1)
+    X = np.array([np.ones(input_length, dtype=floatX) * freq for freq in freqs], dtype=floatX)[:, :, np.newaxis]
+    x_series = np.array([np.linspace(0, input_length*freq, num=input_length, dtype=floatX) for freq in freqs], dtype=floatX)
+    y = func_to_learn(x_series).astype(floatX)[:, :, np.newaxis]
+    return X, y, x_series
+
+def relu(x):
+    return T.maximum(0,x)
+
 def main():
-    g1_size = 6
-    net = ClockWorkRNN(layer_sizes=(1, ([100] * g1_size, [2 ** i for i in range(g1_size)]), 1),
+    layer1_group_size = 3
+    # Crete a network with one hidden layer with 6 groups in it with exponential layer labels
+    # Labels are used to determine if the group's activation will change at time step t
+    # if group_layer % time_step == 0
+    net = ClockWorkRNN(layer_sizes=(1, ([100] * layer1_group_size, [2 ** i for i in range(layer1_group_size)]), 1),
                        cost=quadratic_loss,
-                       hidden_activation=T.tanh,
+                       hidden_activation=relu,
                        output_activation=T.tanh)
 
-    res, upd = net.fptt(keep_activations=False)
-    fptt = theano.function(inputs=[net.XT], outputs=res, updates=upd)
-    learning_rate = theano.shared(float32(0.001))
-    decrement = float32(0.96)
-    predict_after = 2
-    loss = net.cost(res[predict_after:], net.Y[predict_after:])
+    # res, upd = net.fptt(keep_activations=False)
+    # fptt = theano.function(inputs=[net.XT], outputs=res, updates=upd)
+    # predict_after = 2
+    # loss = net.cost(res[predict_after:], net.Y[predict_after:])
+    # train_updates = adam(loss, net.params, learning_rate=learning_rate)
+    # train_func = theano.function(inputs=[net.XT, net.Y], outputs=[loss], updates=upd + train_updates)
+    # X, y, x_series = create_func_params(20, 0.1)
 
-    train_updates = adam(loss, net.params, learning_rate=learning_rate)
-    train_func = theano.function(inputs=[net.XT, net.Y], outputs=[loss], updates=upd + train_updates)
+    learning_rate = theano.shared(float32(0.0002))
+    decrement = float32(0.95)
+
 
     losses = []
     # X = np.linspace(0, upto, num=upto * 30, dtype=floatX)
-    X,y,x_series = create_func_params(20, 0.1)
+    X, y, x_series = create_batch_func_params(200, 0.05, 60)
     best = np.inf
-    plt.ion()
+    # plt.ion()
     last_best_index = 0
-    fig = plt.figure()
-    ax = fig.add_subplot(111)
-    actual, = ax.plot(x_series, y)
-    model, = ax.plot(x_series, fptt(X.reshape(-1, 1)))
-    for i in range(300):
-        losses.append(train_func(X.reshape(-1, 1), y.reshape(-1, 1))[0])
+    # fig = plt.figure()
+    # ax = fig.add_subplot(111)
+    # actual, = ax.plot(x_series, y)
+    # model, = ax.plot(x_series, fptt(X.reshape(-1, 1)))
+    for i in range(1000):
+        # losses.append(train_func(X.reshape(-1, 1), y.reshape(-1, 1))[0])
         # print net.get_current_activations()
+        losses.append(net.bptt(X, y))
         print i, ':', losses[-1]
-        net.reset()
+        # net.reset()
 
-        model.set_ydata(fptt(X.reshape(-1, 1)))
-        fig.canvas.draw()
+        # model.set_ydata(fptt(X.reshape(-1, 1)))
+        # fig.canvas.draw()
         if best > losses[-1]:
             last_best_index = i
             best = losses[-1]
-        elif i - last_best_index > 3:
+        elif i - last_best_index > 4:
             best = losses[-1]
             new_rate = learning_rate.get_value() * decrement
             learning_rate.set_value(new_rate)
-            last_best_index = i - 2
+            last_best_index = i
             print("New learning rate", new_rate)
 
-    X,y, x_series = create_func_params(60, 0.1)
+    X, y, x_series = create_batch_func_params(1000, 0.05, 60)
     plt.ioff()
     plt.clf()
     plt.plot(losses)
     plt.savefig('rnn_quadratic_cost.jpg')
     plt.clf()
-    plt.plot(x_series, fptt(X.reshape(-1, 1)), label='model')
-    plt.plot(x_series, y, label='actual')
+    prediction = net.batch_fptt(X)
+    plt.figure(figsize=(20, 12), dpi=80)
+    plt.plot(net.batch_fptt(X)[0][:,0], label='model')
+    plt.plot(y[0], label='actual')
     plt.legend()
     plt.savefig('rnn_prediction_vs_actual.jpg')
-    with open('net.pickle', 'wb') as f:
-        pickle.dump(net, f)
+    # with open('net.pickle', 'wb') as f:
+    #     pickle.dump(net, f)
+
 
 if __name__ == "__main__":
     main()
