@@ -12,7 +12,7 @@ def negative_log_likelihood(output, prediction):
     output, prediction = T.flatten(output), T.flatten(prediction)
     return -T.mean(T.log(output)[prediction])
 
-def adam(loss, all_params, learning_rate=0.001, b1=0.9, b2=0.999, e=1e-8,
+def adam(loss, all_params, const=[], learning_rate=0.001, b1=0.9, b2=0.999, e=1e-8,
          gamma=1 - 1e-8):
     """
     Code taken from https://gist.github.com/skaae/ae7225263ca8806868cb
@@ -28,7 +28,7 @@ def adam(loss, all_params, learning_rate=0.001, b1=0.9, b2=0.999, e=1e-8,
 
     """
     updates = []
-    all_grads = theano.grad(loss, all_params)
+    all_grads = theano.grad(loss, all_params, consider_constant=const)
     alpha = learning_rate
     t = theano.shared(np.float32(1))
     b1_t = b1 * gamma ** (t - 1)  # (Decay the first moment running average coefficient)
@@ -52,8 +52,8 @@ def adam(loss, all_params, learning_rate=0.001, b1=0.9, b2=0.999, e=1e-8,
     return updates
 
 def quadratic_loss(a, b):
-    a, b = a.flatten(), b.flatten()
+    # a, b = a.flatten(), b.flatten()
     # return T.mean(binary_crossentropy(a, b))
-    return T.mean((b - a) ** 2)
+    return T.mean((b - a) ** 2, axis=1).sum()
 
 
