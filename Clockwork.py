@@ -6,7 +6,6 @@ from theano import tensor as T
 from theano.ifelse import ifelse
 from theano.tensor.nnet import softmax
 import matplotlib.pyplot as plt
-from hf import SequenceDataset,hf_optimizer
 
 from utils import adam, negative_log_likelihood, quadratic_loss, variance
 
@@ -20,6 +19,7 @@ def float32(k):
 
 def int32(k):
     return np.cast['int32'](k)
+
 
 def relu(x):
     return T.maximum(0, x)
@@ -89,7 +89,7 @@ class ClockworkGroup(object):
 
 
     def get_batch_activation(self, previous_layer_activation, time_step, greater_group_activation=[],
-                       current_activation=None):
+                             current_activation=None):
         if not current_activation:
             current_activation = self.current_activation
 
@@ -141,8 +141,8 @@ class ClockworkLayer(object):
             assert isinstance(group, ClockworkGroup)
             self.group_activations.append(
                 group.get_batch_activation(input_activation, time_step,
-                                     self.group_activations,
-                                     current_activation=current_activation[i]))
+                                           self.group_activations,
+                                           current_activation=current_activation[i]))
 
         self.group_activations = list(reversed(self.group_activations))
         # self.updates = list(zip(reversed(current_activations), self.group_activations))
@@ -287,7 +287,7 @@ class ClockWorkRNN(object):
 
     # def fptt(self, keep_activations=False):
     # result, updates = theano.scan(fn=self._recurrence, sequences=[self.XT],
-    #                                   outputs_info=[None, self.time_step] + self._get_current_hidden_activations())
+    # outputs_info=[None, self.time_step] + self._get_current_hidden_activations())
     #     if keep_activations:
     #         updates[self.time_step] = result[1][-1]
     #         for activation, new_activation in zip(self._get_current_hidden_activations(), [r[-1] for r in result[2:]]):
@@ -337,14 +337,12 @@ def create_batch_func_params(input_length=300, freq_var=0.1, size=20):
     return X, y, x_series
 
 
-
-
 def main():
     layer1_group_size = 4
     # Crete a network with one hidden layer with 6 groups in it with exponential layer labels
     # Labels are used to determine if the group's activation will change at time step t
     # if group_layer % time_step == 0
-    net = ClockWorkRNN(layer_sizes=(1, ([30] * layer1_group_size, [2**i for i in range(layer1_group_size)]), 1),
+    net = ClockWorkRNN(layer_sizes=(1, ([30] * layer1_group_size, [2 ** i for i in range(layer1_group_size)]), 1),
                        cost=quadratic_loss,
                        hidden_activation=relu,
                        output_activation=T.tanh)
