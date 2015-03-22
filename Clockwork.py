@@ -21,6 +21,9 @@ def float32(k):
 def int32(k):
     return np.cast['int32'](k)
 
+def relu(x):
+    return T.maximum(0, x)
+
 
 class ClockworkGroup(object):
     def __init__(self, size, label_number, input_shape, greater_label_shapes,
@@ -334,8 +337,6 @@ def create_batch_func_params(input_length=300, freq_var=0.1, size=20):
     return X, y, x_series
 
 
-def relu(x):
-    return T.maximum(0, x)
 
 
 def main():
