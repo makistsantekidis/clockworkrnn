@@ -1,8 +1,10 @@
 __author__ = 'mike'
 
 import theano
+from theano import ifelse
 from theano import tensor as T
 import numpy as np
+
 
 def variance(input_size):
     return 2.0 / input_size
@@ -12,8 +14,9 @@ def negative_log_likelihood(output, prediction):
     output, prediction = T.flatten(output), T.flatten(prediction)
     return -T.mean(T.log(output)[prediction])
 
+
 def adam(loss, all_params, const=[], learning_rate=0.001, b1=0.9, b2=0.999, e=1e-8,
-         gamma=1 - 1e-8):
+         gamma=1 - 1e-8, threshold=6):
     """
     Code taken from https://gist.github.com/skaae/ae7225263ca8806868cb
 
@@ -29,6 +32,9 @@ def adam(loss, all_params, const=[], learning_rate=0.001, b1=0.9, b2=0.999, e=1e
     """
     updates = []
     all_grads = theano.grad(loss, all_params, consider_constant=const)
+    norm_theta = T.sqrt(sum([(grad ** 2).sum() for grad in all_grads]))
+    all_grads = ifelse.ifelse(norm_theta > threshold, [(grad * threshold) / norm_theta for grad in all_grads],
+                              all_grads)
     alpha = learning_rate
     t = theano.shared(np.float32(1))
     b1_t = b1 * gamma ** (t - 1)  # (Decay the first moment running average coefficient)
@@ -50,6 +56,7 @@ def adam(loss, all_params, const=[], learning_rate=0.001, b1=0.9, b2=0.999, e=1e
         updates.append((theta_previous, theta))
     updates.append((t, t + 1.))
     return updates
+
 
 def quadratic_loss(a, b):
     # a, b = a.flatten(), b.flatten()
