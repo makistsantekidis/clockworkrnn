@@ -1,5 +1,9 @@
 __author__ = 'mike'
 
+from time import time
+import cPickle as pickle
+import sys
+
 import numpy as np
 import theano
 from theano import tensor as T
@@ -8,6 +12,8 @@ from theano.tensor.nnet import softmax
 
 from utils import adam, quadratic_loss, variance
 
+
+sys.setrecursionlimit(100000)
 
 floatX = theano.config.floatX
 
@@ -77,12 +83,11 @@ class ClockworkLayer(object):
             time_step += 1
             return new_activation, time_step
 
-        initial_activation = T.ones((theano_input.shape[0], self.initial_activation.shape[0])) * self.initial_activation
-        theano_input = theano_input.dimshuffle(1, 0, 2)
+        initial_activation = T.ones((theano_input.shape[1], self.initial_activation.shape[0])) * self.initial_activation
         output_steps, updates = theano.scan(step, sequences=[theano_input],
                                             outputs_info=[initial_activation, self.timestep],
                                             non_sequences=[self.W_in, self.W_self, self.biases])
-        output_steps = output_steps[0].dimshuffle(1, 0, 2)
+        output_steps = output_steps[0]
         return output_steps, updates
 
 
@@ -108,15 +113,13 @@ class OutputLayer(object):
             activation = self.activation_function(activation)
             return activation
 
-        theano_input = theano_input.dimshuffle(1, 0, 2)
         output_steps, updates = theano.scan(step, sequences=[theano_input],
                                             non_sequences=[self.W_in, self.biases])
-        output_steps = output_steps.dimshuffle(1, 0, 2)
         return output_steps, updates
 
 
 class ClockworkRNN(object):
-    def __init__(self, layer_specs=(1, (2, 20), (2, 10), 1), cost=quadratic_loss, update_fn=adam, learning_rate=0.002):
+    def __init__(self, layer_specs=(1, (2, 20), (2, 10), 1), cost=quadratic_loss, update_fn=adam, learning_rate=0.001):
         self.layer_specs = layer_specs
         self.layers = []
         previous_size = layer_specs[0]
@@ -142,13 +145,16 @@ class ClockworkRNN(object):
         return self._fprop_func(input_steps)
 
     def _fprop(self, theano_input):
+        theano_input = theano_input.dimshuffle(1, 0, 2)
         previous_input = theano_input
         updates = {}
         for layer in self.layers:
             theano_input.tag.test_value = np.ones((2, 10, 1), dtype=floatX)
             previous_input, upd = layer._fprop(previous_input)
             updates.update(dict(upd))
-        return previous_input, updates
+        output = previous_input.dimshuffle(1, 0, 2)
+
+        return output, updates
 
     def bptt(self, X, y):
         if not getattr(self, '_bptt', None):
@@ -158,6 +164,7 @@ class ClockworkRNN(object):
             loss = self.cost(prediction, labeled_data)
             updates = self.update_fn(loss, self.params, learning_rate=self.learning_rate)
             self._bptt = theano.function([theano_input, labeled_data], [loss], updates=updates)
+            self._bptt.trust_input = True
         return self._bptt(X, y)
 
 
@@ -166,7 +173,7 @@ def func_to_learn(X):
 
 
 def create_batch_func_params(input_length=300, freq_var=0.1, size=20):
-    freqs = float32(np.abs(np.random.normal(scale=freq_var, size=size)) + 0.1)
+    freqs = float32(np.abs(np.random.normal(scale=freq_var, size=size)) + 0.2)
     # freqs = np.ones(size, dtype=floatX) * float32(0.1)
     X = np.array([np.ones(input_length, dtype=floatX) * freq for freq in freqs], dtype=floatX)[:, :, np.newaxis]
     x_series = np.array([np.linspace(0, input_length * freq, num=input_length, dtype=floatX) for freq in freqs],
@@ -176,38 +183,52 @@ def create_batch_func_params(input_length=300, freq_var=0.1, size=20):
 
 
 def main():
-    net = ClockworkRNN((1, (10, 30), (2, 10), 1))
+    net = ClockworkRNN((1, (3, 40), 1))
     # ones = np.ones((2, 10, 1), dtype=floatX)
     # res = net.fprop(ones)
     losses = []
-    X, y, x_series = create_batch_func_params()
+    X, y, x_series = create_batch_func_params(400, 0.1, 400)
     best = np.inf
     last_best_index = 0
-    decrement = float32(0.95)
+    decrement = float32(0.99)
+    for i in range(21000):
+        start = time()
 
-    for i in range(2000):
         losses.append(net.bptt(X, y))
-        print i, ':', losses[-1]
+        epoch_time = time() - start
+        print i, ':', losses[-1], " took :", epoch_time
 
         if best > losses[-1]:
             last_best_index = i
             best = losses[-1]
-        elif i - last_best_index > 20:
+        elif i - last_best_index > 9:
             best = losses[-1]
             new_rate = net.learning_rate.get_value() * decrement
             net.learning_rate.set_value(new_rate)
             last_best_index = i
             print("New learning rate", new_rate)
 
+    with open('rnn.pickle', 'wb') as f:
+        pickle.dump(net, f)
+
+    plt.figure(figsize=(100, 20), dpi=100)
     plt.plot(losses)
     plt.savefig('rnn_quadratic_cost.jpg')
     plt.clf()
+    X, y, x_series = create_batch_func_params(1200, 0.1)
+
     prediction = net.fprop(X)
-    plt.figure(figsize=(150, 12), dpi=100)
-    plt.plot(prediction[0], label='model')
-    plt.plot(y[0], label='actual')
-    plt.legend()
-    plt.savefig('rnn_prediction_vs_actual.jpg')
+    # plt.close('all')
+    f, axarr = plt.subplots(len(X), sharex=True, figsize=(160, 100))
+    for i in range(len(X)):
+        # axarr[i].figure.figure = plt.figure(figsize=(150, 12), dpi=100)
+        axarr[i].plot(prediction[i], label='model')
+        axarr[i].plot(y[i], label='actual')
+        axarr[i].plot(np.abs(y[i] - prediction[i]), label='diff')
+        axarr[i].legend()
+
+    f.savefig('rnn_prediction_vs_actual.jpg')
+
     print "done"
 
 

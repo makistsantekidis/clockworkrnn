@@ -8,6 +8,8 @@ from theano.tensor.nnet import softmax
 import matplotlib.pyplot as plt
 
 from utils import adam, negative_log_likelihood, quadratic_loss, variance
+import sys
+sys.setrecursionlimit(50000)
 
 
 floatX = theano.config.floatX

@@ -59,8 +59,6 @@ def adam(loss, all_params, const=[], learning_rate=0.001, b1=0.9, b2=0.999, e=1e
 
 
 def quadratic_loss(a, b):
-    # a, b = a.flatten(), b.flatten()
-    # return T.mean(binary_crossentropy(a, b))
-    return T.mean((b - a) ** 2, axis=1).sum()
+    return T.mean(T.mean((b - a) ** 2, axis=0), axis=0).sum()
 
 
