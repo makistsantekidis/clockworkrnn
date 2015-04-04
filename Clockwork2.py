@@ -217,7 +217,7 @@ class ClockworkRNN(object):
             self._bptt = theano.function([theano_input, labeled_data],
                                          [loss, norm, grad_threshold, momentum_norm, momentum_norm_threshold],
                                          updates=updates, allow_input_downcast=True)
-            self._bptt.trust_input = True
+            # self._bptt.trust_input = True
         return self._bptt(X, y)
 
 
@@ -244,11 +244,11 @@ def main():
     norms, momentum_norms = [], []
     norms_thres, momentum_norms_thres = [], []
     # X, y, x_series = create_batch_func_params(500, 0.1, 2)
-    X, y, x_series = create_batch_func_params(410, 0.1, 3)
+    X, y, x_series = create_batch_func_params(410, 0.1, 2000)
     best = np.inf
     last_best_index = 0
-    decrement = float32(0.95)
-    for i in range(2000):
+    decrement = float32(0.99)
+    for i in range(8000):
         start = time()
         loss, norm, norm_theshold, momentum_norm, momentum_norm_threshold = net.bptt(X, y)
         losses.append(loss)
@@ -263,7 +263,7 @@ def main():
         if best > losses[-1]:
             last_best_index = i
             best = losses[-1]
-        elif i - last_best_index > 30:
+        elif i - last_best_index > 20:
             best = losses[-1]
             new_rate = net.learning_rate.get_value() * decrement
             net.learning_rate.set_value(new_rate)
@@ -321,8 +321,8 @@ def main():
     fig.savefig('rnn_norms.jpg')
     plt.clf()
 
-    X, y, x_series = X[:10], y[:10], x_series[:10]
-    # X, y, x_series = create_batch_func_params(1500, 0.1, 10)
+    # X, y, x_series = X[:10], y[:10], x_series[:10]
+    X, y, x_series = create_batch_func_params(1500, 0.1, 10)
 
     prediction = net.fprop(X)
     # plt.close('all')

@@ -27,6 +27,10 @@ def negative_log_likelihood(output, prediction):
     return -T.mean(T.log(output)[prediction])
 
 
+def cross_entropy(output, prediction):
+    return T.nnet.categorical_crossentropy(prediction, output).mean()
+
+
 def sgd(loss, all_params, grads=None, const=[], learning_rate=0.001, b1=0.9, b2=0.999, e=1e-8,
         gamma=1 - 1e-8, grad_threshold=10., momentum_threshold=1., ema_n=0.999, max_drawdown=0.4, drawdown_dumping=0.4,
         training_step=None):
@@ -118,7 +122,7 @@ def adam(loss, all_params, grads=None, const=[], learning_rate=0.001, b1=0.9, b2
         # [m * np.float32(drawdown_dumping), v * np.float32(drawdown_dumping)])
 
         # m, v = ifelse(T.eq(T.mod(training_step, 10), 0), [m, v],
-        #               [m * np.float32(drawdown_dumping), v * np.float32(drawdown_dumping)])
+        # [m * np.float32(drawdown_dumping), v * np.float32(drawdown_dumping)])
 
         m = b1_t * m + (1 - b1_t) * g  # (Update biased first moment estimate)
         v = b2 * v + (1 - b2) * g ** 2  # (Update biased second raw moment estimate)
