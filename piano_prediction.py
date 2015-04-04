@@ -4,7 +4,7 @@ import cPickle as pickle
 from time import time
 import numpy as np
 import theano
-from Clockwork2 import ClockworkRNN
+from Clockwork import ClockworkRNN
 from utils import adam, quadratic_loss, variance, float32, int32, relu, sgd, cross_entropy
 
 floatX = theano.config.floatX
